@@ -2,8 +2,10 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import path from 'path';
 
-// Store db in the root of the project
-const dbPath = path.resolve(process.cwd(), 'data.db');
+// Store db in the configured path or fallback to project root
+const dbPath = process.env.DATABASE_PATH 
+  ? path.resolve(process.env.DATABASE_PATH)
+  : path.resolve(process.cwd(), 'data.db');
 const db = new Database(dbPath, { timeout: 8000 });
 
 // Enable WAL mode for performance

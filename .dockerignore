@@ -1,0 +1,12 @@
+node_modules
+dist
+.astro
+data.db
+data.db-shm
+data.db-wal
+.git
+.vscode
+.github
+README.md
+Dockerfile
+fly.toml
