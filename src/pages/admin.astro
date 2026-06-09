@@ -1,0 +1,962 @@
+---
+import Layout from '../layouts/Layout.astro';
+import db from '../lib/db';
+import bcrypt from 'bcryptjs';
+
+// Force dynamic execution (SSR)
+export const prerender = false;
+
+// 1. Session & Auth Logic
+let isAuthenticated = false;
+let sessionToken = Astro.cookies.get('portfolio_session')?.value;
+
+if (sessionToken) {
+  // Validate session against DB and check expiry
+  const session = db.prepare('SELECT * FROM sessions WHERE token = ? AND expires_at > ?')
+    .get(sessionToken, Date.now()) as any;
+  if (session) {
+    isAuthenticated = true;
+  } else {
+    // Delete expired/invalid session cookie
+    Astro.cookies.delete('portfolio_session', { path: '/' });
+  }
+}
+
+let authError = "";
+let actionMessage = "";
+
+// 2. Handle Action Form Submissions (POST)
+if (Astro.request.method === "POST") {
+  try {
+    const formData = await Astro.request.formData();
+    const action = formData.get("action") as string;
+
+    // LOGIN ACTION
+    if (action === "login") {
+      const password = formData.get("password") as string;
+      const adminHashRow = db.prepare("SELECT value FROM admin_settings WHERE key = 'password_hash'").get() as { value: string } | undefined;
+      
+      if (adminHashRow && bcrypt.compareSync(password, adminHashRow.value)) {
+        // Create session in DB
+        const token = crypto.randomUUID();
+        const expiresAt = Date.now() + 1000 * 60 * 60 * 24; // 24 Hours duration
+        
+        db.prepare('INSERT INTO sessions (token, expires_at) VALUES (?, ?)')
+          .run(token, expiresAt);
+        
+        // Set Secure HTTPOnly Session Cookie
+        Astro.cookies.set('portfolio_session', token, {
+          path: '/',
+          httpOnly: true,
+          secure: true,
+          sameSite: 'strict',
+          maxAge: 60 * 60 * 24 // 24 Hours
+        });
+        
+        return Astro.redirect('/admin');
+      } else {
+        authError = "Invalid admin credentials. Please try again.";
+      }
+    }
+
+    // LOGOUT ACTION
+    else if (action === "logout") {
+      if (sessionToken) {
+        db.prepare('DELETE FROM sessions WHERE token = ?').run(sessionToken);
+      }
+      Astro.cookies.delete('portfolio_session', { path: '/' });
+      return Astro.redirect('/admin');
+    }
+
+    // AUTH GUARD: All following DB actions require valid session
+    else if (!isAuthenticated) {
+      return new Response("Unauthorized operation.", { status: 401 });
+    }
+
+    // UPDATE STATUS ACTION
+    else if (action === "update_status") {
+      const status = formData.get("status") as string;
+      if (status) {
+        db.prepare('INSERT INTO status_update (status, updated_at) VALUES (?, ?)')
+          .run(status, new Date().toISOString());
+        actionMessage = "Status update log appended successfully.";
+      }
+    }
+
+    // ADD PROJECT ACTION
+    else if (action === "add_project") {
+      const title = formData.get("title") as string;
+      const description = formData.get("description") as string;
+      const tagsRaw = formData.get("tech_tags") as string;
+      const github = formData.get("github_link") as string || null;
+      const live = formData.get("live_link") as string || null;
+
+      const techTags = JSON.stringify(
+        tagsRaw.split(',')
+          .map(t => t.trim())
+          .filter(Boolean)
+      );
+
+      const maxOrderRow = db.prepare('SELECT MAX(order_index) as max_order FROM projects').get() as { max_order: number | null };
+      const orderIdx = (maxOrderRow.max_order || 0) + 1;
+
+      db.prepare(`
+        INSERT INTO projects (title, description, tech_tags, github_link, live_link, order_index)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(title, description, techTags, github, live, orderIdx);
+
+      actionMessage = `Project '${title}' registered successfully.`;
+    }
+
+    // EDIT PROJECT ACTION
+    else if (action === "edit_project") {
+      const id = formData.get("id") as string;
+      const title = formData.get("title") as string;
+      const description = formData.get("description") as string;
+      const tagsRaw = formData.get("tech_tags") as string;
+      const github = formData.get("github_link") as string || null;
+      const live = formData.get("live_link") as string || null;
+
+      const techTags = JSON.stringify(
+        tagsRaw.split(',')
+          .map(t => t.trim())
+          .filter(Boolean)
+      );
+
+      db.prepare(`
+        UPDATE projects 
+        SET title = ?, description = ?, tech_tags = ?, github_link = ?, live_link = ?
+        WHERE id = ?
+      `).run(title, description, techTags, github, live, id);
+
+      actionMessage = `Project '${title}' modified successfully.`;
+    }
+
+    // DELETE PROJECT ACTION
+    else if (action === "delete_project") {
+      const id = formData.get("id") as string;
+      db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+      actionMessage = "Project resource deleted successfully.";
+    }
+
+    // TOGGLE SKILL ACTION
+    else if (action === "toggle_skill") {
+      const id = formData.get("id") as string;
+      const currentActive = db.prepare('SELECT is_active FROM skills WHERE id = ?').get(id) as { is_active: number } | undefined;
+      
+      if (currentActive) {
+        const nextState = currentActive.is_active === 1 ? 0 : 1;
+        db.prepare('UPDATE skills SET is_active = ? WHERE id = ?').run(nextState, id);
+        actionMessage = "Skill active status updated.";
+      }
+    }
+
+    // MOVE PROJECT UP / DOWN ACTION
+    else if (action === "move_project_up" || action === "move_project_down") {
+      const id = parseInt(formData.get("id") as string);
+      const current = db.prepare('SELECT order_index FROM projects WHERE id = ?').get(id) as { order_index: number } | undefined;
+      if (current) {
+        const isUp = action === "move_project_up";
+        const adjacent = isUp
+          ? db.prepare('SELECT id, order_index FROM projects WHERE order_index < ? ORDER BY order_index DESC LIMIT 1').get(current.order_index) as { id: number, order_index: number } | undefined
+          : db.prepare('SELECT id, order_index FROM projects WHERE order_index > ? ORDER BY order_index ASC LIMIT 1').get(current.order_index) as { id: number, order_index: number } | undefined;
+        
+        if (adjacent) {
+          db.transaction(() => {
+            db.prepare('UPDATE projects SET order_index = ? WHERE id = ?').run(adjacent.order_index, id);
+            db.prepare('UPDATE projects SET order_index = ? WHERE id = ?').run(current.order_index, adjacent.id);
+          })();
+          actionMessage = "Project display order updated.";
+        }
+      }
+    }
+
+    // MOVE SKILL UP / DOWN ACTION
+    else if (action === "move_skill_up" || action === "move_skill_down") {
+      const id = parseInt(formData.get("id") as string);
+      const current = db.prepare('SELECT order_index, category FROM skills WHERE id = ?').get(id) as { order_index: number, category: string } | undefined;
+      if (current) {
+        const isUp = action === "move_skill_up";
+        const adjacent = isUp
+          ? db.prepare('SELECT id, order_index FROM skills WHERE category = ? AND order_index < ? ORDER BY order_index DESC LIMIT 1').get(current.category, current.order_index) as { id: number, order_index: number } | undefined
+          : db.prepare('SELECT id, order_index FROM skills WHERE category = ? AND order_index > ? ORDER BY order_index ASC LIMIT 1').get(current.category, current.order_index) as { id: number, order_index: number } | undefined;
+        
+        if (adjacent) {
+          db.transaction(() => {
+            db.prepare('UPDATE skills SET order_index = ? WHERE id = ?').run(adjacent.order_index, id);
+            db.prepare('UPDATE skills SET order_index = ? WHERE id = ?').run(current.order_index, adjacent.id);
+          })();
+          actionMessage = "Skill display order updated.";
+        }
+      }
+    }
+
+    // ADD SKILL ACTION
+    else if (action === "add_skill") {
+      const name = formData.get("name") as string;
+      const category = formData.get("category") as string;
+
+      const maxOrderRow = db.prepare('SELECT MAX(order_index) as max_order FROM skills WHERE category = ?').get(category) as { max_order: number | null };
+      const orderIdx = (maxOrderRow.max_order || 0) + 1;
+
+      db.prepare('INSERT INTO skills (name, category, is_active, order_index) VALUES (?, ?, 1, ?)')
+        .run(name, category, orderIdx);
+
+      actionMessage = `Skill '${name}' registered successfully.`;
+    }
+
+    // CHANGE PASSWORD ACTION
+    else if (action === "change_password") {
+      const newPassword = formData.get("new_password") as string;
+      if (newPassword && newPassword.length >= 6) {
+        const salt = bcrypt.genSaltSync(10);
+        const hash = bcrypt.hashSync(newPassword, salt);
+        db.prepare("UPDATE admin_settings SET value = ? WHERE key = 'password_hash'")
+          .run(hash);
+        actionMessage = "Admin password updated successfully.";
+      } else {
+        authError = "Error: Password must be at least 6 characters.";
+      }
+    }
+
+    // UPDATE PORTFOLIO SETTINGS ACTION
+    else if (action === "update_settings") {
+      const keys = [
+        'dev_name', 'dev_role', 'dev_languages', 'dev_focus',
+        'hero_title', 'hero_description',
+        'about_title', 'about_description_1', 'about_description_2', 'about_description_3', 'about_philosophy',
+        'contact_email', 'contact_github', 'contact_linkedin', 'contact_resume_link', 'contact_description'
+      ];
+      
+      db.transaction(() => {
+        const stmt = db.prepare('INSERT OR REPLACE INTO portfolio_settings (key, value) VALUES (?, ?)');
+        for (const k of keys) {
+          const val = formData.get(k) as string;
+          if (val !== null) {
+            stmt.run(k, val);
+          }
+        }
+      })();
+      actionMessage = "Portfolio profile settings updated successfully.";
+    }
+  } catch (err) {
+    console.error("Dashboard server exception:", err);
+    authError = "Internal state error: " + (err as Error).message;
+  }
+}
+
+// 3. Fetch Admin Workspace Content (only if authenticated)
+let projectsList = [];
+let skillsList = [];
+let statusLogs = [];
+let currentStatus = "";
+let settingsMap = new Map<string, string>();
+
+if (isAuthenticated) {
+  projectsList = db.prepare('SELECT * FROM projects ORDER BY order_index ASC').all() as any[];
+  // Parse JSON tags for front-end rendering
+  projectsList = projectsList.map(p => ({
+    ...p,
+    tech_tags_array: JSON.parse(p.tech_tags) as string[]
+  }));
+
+  skillsList = db.prepare('SELECT * FROM skills ORDER BY category, order_index ASC').all() as any[];
+  
+  statusLogs = db.prepare('SELECT * FROM status_update ORDER BY id DESC LIMIT 5').all() as any[];
+  if (statusLogs.length > 0) {
+    currentStatus = statusLogs[0].status;
+  }
+
+  const settingsRows = db.prepare('SELECT * FROM portfolio_settings').all() as { key: string, value: string }[];
+  settingsMap = new Map(settingsRows.map(s => [s.key, s.value]));
+}
+---
+
+<Layout title="Admin Workspace | Portfolio Management" isAdmin={true}>
+  
+  <!-- CASE A: UNAUTHENTICATED LOGIN SCREEN -->
+  {!isAuthenticated ? (
+    <div class="h-full flex items-center justify-center px-4">
+      <div class="w-full max-w-md bg-[#0c1222] border ide-border rounded-xl p-8 shadow-2xl glass-panel space-y-6 relative overflow-hidden">
+        
+        <!-- Header status decoration -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div class="flex items-center gap-2 font-mono text-xs text-rose-500">
+            <span class="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping"></span>
+            <span>SYSTEM LOCKED</span>
+          </div>
+          <span class="font-mono text-xs text-slate-500">v0.0.1</span>
+        </div>
+
+        <div class="space-y-2">
+          <h1 class="text-xl font-bold font-mono text-slate-200">Authenticate Access</h1>
+          <p class="text-xs text-slate-400 font-mono">Input administrator password to open the workspace DB writing permissions.</p>
+        </div>
+
+        {authError && (
+          <div class="bg-red-500/10 border border-red-500/20 p-3.5 rounded text-xs font-mono text-red-400 flex items-center gap-2">
+            <span>⚠</span>
+            <span>{authError}</span>
+          </div>
+        )}
+
+        <form method="POST" class="space-y-4 font-mono text-sm">
+          <input type="hidden" name="action" value="login" />
+          <div class="space-y-1.5">
+            <label for="password" class="text-xs text-slate-400">ADMIN_PASSWORD</label>
+            <input 
+              type="password" 
+              id="password" 
+              name="password" 
+              required 
+              placeholder="••••••••••••"
+              class="w-full bg-[#070a12] border ide-border rounded px-3.5 py-2.5 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-base transition-colors"
+            />
+          </div>
+          <button 
+            type="submit" 
+            class="w-full bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold py-2.5 rounded cursor-pointer transition-colors"
+          >
+            Decrypt Workspace
+          </button>
+        </form>
+
+        <div class="text-[10px] font-mono text-slate-500 text-center border-t border-slate-800/60 pt-4">
+          Default password is 'admin' unless set in environmental settings.
+        </div>
+      </div>
+    </div>
+  ) : (
+    
+    /* CASE B: AUTHENTICATED ADMIN DASHBOARD */
+    <div class="w-full max-w-5xl mx-auto px-4 md:px-8 py-10 space-y-12 select-text pb-24">
+      
+      <!-- Top banner logs / messages -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-6">
+        <div>
+          <h1 class="text-2xl font-bold text-slate-100 flex items-center gap-2 font-mono">
+            <span class="text-[#38bdf8]">⌥</span> admin_dashboard.db
+          </h1>
+          <p class="text-xs text-slate-400 font-mono mt-1">
+            Write access authenticated. Making direct alterations to database workspace.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <form method="POST">
+            <input type="hidden" name="action" value="logout" />
+            <button 
+              type="submit" 
+              class="px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-mono text-xs rounded transition-all cursor-pointer"
+            >
+              Sign Out
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {actionMessage && (
+        <div class="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-lg text-xs font-mono text-emerald-400 flex items-center gap-3.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold">✓</span>
+          <span>{actionMessage}</span>
+        </div>
+      )}
+
+      {authError && (
+        <div class="bg-red-500/10 border border-red-500/20 p-4 rounded-lg text-xs font-mono text-red-400 flex items-center gap-3.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 font-bold">⚠</span>
+          <span>{authError}</span>
+        </div>
+      )}
+
+      <!-- Tabs Bar -->
+      <div class="flex border-b border-slate-800 bg-[#0d121f] rounded-t-lg overflow-hidden font-mono text-xs max-w-[320px] mb-2">
+        <button type="button" id="btn-tab-content" class="px-4 py-2.5 border-r border-slate-800 bg-[#0c1222] text-sky-400 font-semibold border-b-2 border-b-sky-500 cursor-pointer transition-all">
+          workspace_content.db
+        </button>
+        <button type="button" id="btn-tab-profile" class="px-4 py-2.5 border-r border-slate-800 text-slate-500 hover:text-slate-300 cursor-pointer transition-all">
+          workspace_profile.conf
+        </button>
+      </div>
+
+      <!-- Pane 1: Content Manager -->
+      <div id="pane-content" class="space-y-12">
+        <!-- GRID DOCK -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        
+        <!-- LEFT: STATUS LOGS AND SECURITY (4 cols) -->
+        <div class="lg:col-span-4 space-y-8">
+          
+          <!-- status.log Card -->
+          <div id="status" class="bg-[#0c1222] border border-slate-800 rounded-xl p-5 shadow-xl glass-panel space-y-4">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+              <span class="font-mono text-xs text-[#10b981] font-bold">⚡ status.log</span>
+              <span class="text-[10px] text-slate-500 font-mono">Live Sync</span>
+            </div>
+            
+            <form method="POST" class="space-y-3 font-mono text-xs">
+              <input type="hidden" name="action" value="update_status" />
+              <div class="space-y-1">
+                <label for="status-input" class="text-[#64748b]">STATUS_STRING</label>
+                <textarea 
+                  id="status-input" 
+                  name="status" 
+                  rows="3" 
+                  required
+                  placeholder="What are you currently coding?" 
+                  class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 text-xs font-sans"
+                >{currentStatus}</textarea>
+              </div>
+              <button 
+                type="submit" 
+                class="w-full bg-[#10b981] hover:bg-[#059669] text-slate-900 font-bold py-1.5 rounded text-xs transition-colors cursor-pointer"
+              >
+                Commit Status Update
+              </button>
+            </form>
+
+            <div class="space-y-2.5 pt-2 border-t border-slate-800/60">
+              <span class="text-[10px] text-slate-500 font-mono block">RECENT LOG ENTRIES:</span>
+              <div class="space-y-2">
+                {statusLogs.map((log) => (
+                  <div class="p-2 bg-[#070a12] border border-slate-800/80 rounded text-[10px] font-mono">
+                    <p class="text-slate-300 leading-tight">{log.status}</p>
+                    <span class="text-slate-500 text-[8px] mt-1 block">
+                      {new Date(log.updated_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <!-- Security / settings.db Card -->
+          <div class="bg-[#0c1222] border border-slate-800 rounded-xl p-5 shadow-xl glass-panel space-y-4">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+              <span class="font-mono text-xs text-rose-400 font-bold">⚙️ security.conf</span>
+              <span class="text-[10px] text-slate-500 font-mono">Key Bind</span>
+            </div>
+            
+            <form method="POST" class="space-y-3 font-mono text-xs">
+              <input type="hidden" name="action" value="change_password" />
+              <div class="space-y-1">
+                <label for="new_password" class="text-[#64748b]">NEW_ADMIN_PASSWORD</label>
+                <input 
+                  type="password" 
+                  id="new_password" 
+                  name="new_password" 
+                  required
+                  placeholder="At least 6 characters" 
+                  class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 text-xs"
+                />
+              </div>
+              <button 
+                type="submit" 
+                class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-1.5 rounded text-xs transition-colors cursor-pointer"
+              >
+                Rehash Password Key
+              </button>
+            </form>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: PROJECTS & SKILLS LISTS (8 cols) -->
+        <div class="lg:col-span-8 space-y-8">
+          
+          <!-- PROJECTS SECTION (projects.json) -->
+          <div id="projects" class="bg-[#0c1222] border border-slate-800 rounded-xl p-5 shadow-xl glass-panel space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+              <span class="font-mono text-xs text-[#38bdf8] font-bold">✏️ projects.json (CRUD)</span>
+              <button 
+                type="button" 
+                id="toggle-project-form-btn"
+                class="px-2.5 py-1 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 text-sky-400 font-mono text-[10px] rounded transition-all cursor-pointer"
+              >
+                + Add Project File
+              </button>
+            </div>
+
+            <!-- ADD / EDIT PROJECT FORM (HIDDEN BY DEFAULT) -->
+            <div id="project-form-container" class="hidden bg-[#070a12] border border-slate-800/80 rounded-lg p-4 font-mono text-xs space-y-4">
+              <h3 id="form-title" class="text-sm font-bold text-sky-400">// Add Project File</h3>
+              
+              <form id="project-mut-form" method="POST" class="space-y-3.5 text-xs">
+                <input type="hidden" name="action" id="project-action-field" value="add_project" />
+                <input type="hidden" name="id" id="project-id-field" value="" />
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div class="space-y-1">
+                    <label class="text-slate-400">PROJECT_TITLE *</label>
+                    <input type="text" name="title" id="p-title" required class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans" />
+                  </div>
+                  <div class="space-y-1">
+                    <label class="text-slate-400">TECH_TAGS (Comma-separated) *</label>
+                    <input type="text" name="tech_tags" id="p-tags" required placeholder="Rust, WebAssembly, SQLite" class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+                  </div>
+                </div>
+
+                <div class="space-y-1">
+                  <label class="text-slate-400">DESCRIPTION *</label>
+                  <textarea name="description" id="p-desc" rows="3" required class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs"></textarea>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div class="space-y-1">
+                    <label class="text-slate-400">GITHUB_URL_LINK</label>
+                    <input type="url" name="github_link" id="p-github" placeholder="https://github.com/..." class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+                  </div>
+                  <div class="space-y-1">
+                    <label class="text-slate-400">LIVE_DEMO_URL_LINK</label>
+                    <input type="url" name="live_link" id="p-live" placeholder="https://..." class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-end gap-3 pt-2">
+                  <button type="button" id="cancel-project-form-btn" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition-all cursor-pointer">Cancel</button>
+                  <button type="submit" id="submit-project-form-btn" class="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold rounded transition-all cursor-pointer">Commit File</button>
+                </div>
+              </form>
+            </div>
+
+            <!-- PROJECTS LIST TABLE -->
+            <div class="overflow-x-auto border border-slate-800 rounded-lg">
+              <table class="w-full text-left font-mono text-xs select-none">
+                <thead class="bg-[#070a12] text-slate-400 border-b border-slate-800">
+                  <tr>
+                    <th class="p-3">Title</th>
+                    <th class="p-3 hidden sm:table-cell">Tags</th>
+                    <th class="p-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60">
+                  {projectsList.map((project) => (
+                    <tr class="hover:bg-[#070a12]/30 transition-colors">
+                      <td class="p-3 font-bold text-slate-200 truncate max-w-[120px] sm:max-w-none">{project.title}</td>
+                      <td class="p-3 hidden sm:table-cell">
+                        <div class="flex flex-wrap gap-1">
+                          {project.tech_tags_array.slice(0, 3).map(tag => (
+                            <span class="px-1.5 py-0.5 bg-[#070a12] border border-slate-800 rounded text-[9px] text-sky-400">{tag}</span>
+                          ))}
+                          {project.tech_tags_array.length > 3 && <span class="text-slate-500 text-[9px]">+{project.tech_tags_array.length - 3}</span>}
+                        </div>
+                      </td>
+                      <td class="p-3">
+                        <div class="flex items-center justify-end gap-2.5">
+                          <div class="flex items-center gap-1">
+                            <form method="POST" class="inline">
+                              <input type="hidden" name="action" value="move_project_up" />
+                              <input type="hidden" name="id" value={project.id} />
+                              <button type="submit" class="p-1 bg-[#070a12] hover:bg-slate-800 border ide-border text-slate-400 hover:text-sky-400 rounded text-[9px] cursor-pointer" title="Move Up">▲</button>
+                            </form>
+                            <form method="POST" class="inline">
+                              <input type="hidden" name="action" value="move_project_down" />
+                              <input type="hidden" name="id" value={project.id} />
+                              <button type="submit" class="p-1 bg-[#070a12] hover:bg-slate-800 border ide-border text-slate-400 hover:text-sky-400 rounded text-[9px] cursor-pointer" title="Move Down">▼</button>
+                            </form>
+                          </div>
+
+                          <button 
+                            type="button"
+                            class="edit-project-btn text-sky-400 hover:text-sky-300 bg-sky-950/20 hover:bg-sky-950/60 border border-sky-500/20 px-2 py-0.5 rounded transition-all cursor-pointer"
+                            data-id={project.id}
+                            data-title={project.title}
+                            data-desc={project.description}
+                            data-tags={project.tech_tags_array.join(', ')}
+                            data-github={project.github_link || ''}
+                            data-live={project.live_link || ''}
+                          >
+                            Edit
+                          </button>
+                          
+                          <form method="POST" onsubmit="return confirm('Execute permanent removal of this project entry?');">
+                            <input type="hidden" name="action" value="delete_project" />
+                            <input type="hidden" name="id" value={project.id} />
+                            <button 
+                              type="submit" 
+                              class="text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/60 border border-rose-500/20 px-2 py-0.5 rounded transition-all cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                          </form>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- SKILLS SECTION (skills.db) -->
+          <div id="skills" class="bg-[#0c1222] border border-slate-800 rounded-xl p-5 shadow-xl glass-panel space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+              <span class="font-mono text-xs text-[#a855f7] font-bold">⚙️ skills.db (Toggle Matrix)</span>
+              <button 
+                type="button" 
+                id="toggle-skill-form-btn"
+                class="px-2.5 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 font-mono text-[10px] rounded transition-all cursor-pointer"
+              >
+                + Register Skill
+              </button>
+            </div>
+
+            <!-- ADD SKILL FORM (HIDDEN BY DEFAULT) -->
+            <div id="skill-form-container" class="hidden bg-[#070a12] border border-slate-800/80 rounded-lg p-4 font-mono text-xs space-y-3">
+              <h3 class="text-xs font-bold text-purple-400">// Register Skill Node</h3>
+              
+              <form method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end text-xs">
+                <input type="hidden" name="action" value="add_skill" />
+                
+                <div class="space-y-1">
+                  <label for="s-name" class="text-slate-400">SKILL_NAME *</label>
+                  <input type="text" id="s-name" name="name" required placeholder="Docker, WebGL, etc." class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-purple-500" />
+                </div>
+
+                <div class="space-y-1">
+                  <label for="s-category" class="text-slate-400">CATEGORY *</label>
+                  <select id="s-category" name="category" required class="w-full bg-[#0c1222] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-purple-500 font-sans">
+                    <option value="systems">Low-Level & Systems</option>
+                    <option value="cross-platform">Cross-Platform & Mobile</option>
+                    <option value="backend-web">Backend & Web</option>
+                  </select>
+                </div>
+
+                <div class="flex gap-2">
+                  <button type="button" id="cancel-skill-form-btn" class="flex-grow py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition-all cursor-pointer">Cancel</button>
+                  <button type="submit" class="flex-grow py-2 bg-[#a855f7] hover:bg-[#9333ea] text-white font-bold rounded transition-all cursor-pointer font-mono">Register</button>
+                </div>
+              </form>
+            </div>
+
+            <!-- SKILLS LISTING & TOGGLE -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 font-mono text-xs">
+              
+              <!-- Systems Category -->
+              <div class="bg-[#070a12]/50 border border-slate-800/80 rounded-lg p-3 space-y-2">
+                <span class="text-orange-400 font-bold border-b border-slate-800/60 pb-1.5 block">low_level_systems</span>
+                <div class="space-y-1.5">
+                  {skillsList.filter(s => s.category === 'systems').map(skill => (
+                    <div class="flex items-center justify-between p-1.5 hover:bg-slate-900/60 rounded">
+                      <span class={skill.is_active === 1 ? "text-slate-200" : "text-slate-500 line-through"}>{skill.name}</span>
+                      <div class="flex items-center gap-2">
+                        <form method="POST" class="inline-flex items-center gap-0.5">
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button type="submit" name="action" value="move_skill_up" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Up">▲</button>
+                          <button type="submit" name="action" value="move_skill_down" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Down">▼</button>
+                        </form>
+                        <form method="POST">
+                          <input type="hidden" name="action" value="toggle_skill" />
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button 
+                            type="submit" 
+                            class={`px-2 py-0.5 rounded text-[9px] transition-colors cursor-pointer border ${
+                              skill.is_active === 1 
+                                ? "bg-emerald-950/20 text-emerald-400 border-emerald-500/20 hover:bg-emerald-950/50" 
+                                : "bg-slate-800/40 text-slate-500 border-slate-700/30 hover:bg-slate-800"
+                            }`}
+                          >
+                            {skill.is_active === 1 ? "Active" : "Hidden"}
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <!-- Cross Platform Category -->
+              <div class="bg-[#070a12]/50 border border-slate-800/80 rounded-lg p-3 space-y-2">
+                <span class="text-[#a855f7] font-bold border-b border-slate-800/60 pb-1.5 block">cross_platform</span>
+                <div class="space-y-1.5">
+                  {skillsList.filter(s => s.category === 'cross-platform').map(skill => (
+                    <div class="flex items-center justify-between p-1.5 hover:bg-slate-900/60 rounded">
+                      <span class={skill.is_active === 1 ? "text-slate-200" : "text-slate-500 line-through"}>{skill.name}</span>
+                      <div class="flex items-center gap-2">
+                        <form method="POST" class="inline-flex items-center gap-0.5">
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button type="submit" name="action" value="move_skill_up" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Up">▲</button>
+                          <button type="submit" name="action" value="move_skill_down" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Down">▼</button>
+                        </form>
+                        <form method="POST">
+                          <input type="hidden" name="action" value="toggle_skill" />
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button 
+                            type="submit" 
+                            class={`px-2 py-0.5 rounded text-[9px] transition-colors cursor-pointer border ${
+                              skill.is_active === 1 
+                                ? "bg-emerald-950/20 text-emerald-400 border-emerald-500/20 hover:bg-emerald-950/50" 
+                                : "bg-slate-800/40 text-slate-500 border-slate-700/30 hover:bg-slate-800"
+                            }`}
+                          >
+                            {skill.is_active === 1 ? "Active" : "Hidden"}
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <!-- Web & Backend Category -->
+              <div class="bg-[#070a12]/50 border border-slate-800/80 rounded-lg p-3 space-y-2">
+                <span class="text-emerald-400 font-bold border-b border-slate-800/60 pb-1.5 block">backend_web</span>
+                <div class="space-y-1.5">
+                  {skillsList.filter(s => s.category === 'backend-web').map(skill => (
+                    <div class="flex items-center justify-between p-1.5 hover:bg-slate-900/60 rounded">
+                      <span class={skill.is_active === 1 ? "text-slate-200" : "text-slate-500 line-through"}>{skill.name}</span>
+                      <div class="flex items-center gap-2">
+                        <form method="POST" class="inline-flex items-center gap-0.5">
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button type="submit" name="action" value="move_skill_up" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Up">▲</button>
+                          <button type="submit" name="action" value="move_skill_down" class="text-slate-500 hover:text-slate-300 text-[10px] px-0.5 cursor-pointer" title="Move Down">▼</button>
+                        </form>
+                        <form method="POST">
+                          <input type="hidden" name="action" value="toggle_skill" />
+                          <input type="hidden" name="id" value={skill.id} />
+                          <button 
+                            type="submit" 
+                            class={`px-2 py-0.5 rounded text-[9px] transition-colors cursor-pointer border ${
+                              skill.is_active === 1 
+                                ? "bg-emerald-950/20 text-emerald-400 border-emerald-500/20 hover:bg-emerald-950/50" 
+                                : "bg-slate-800/40 text-slate-500 border-slate-700/30 hover:bg-slate-800"
+                            }`}
+                          >
+                            {skill.is_active === 1 ? "Active" : "Hidden"}
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+      </div>
+      
+      </div> <!-- Close Pane 1: Content Manager -->
+
+      <!-- Pane 2: Profile Settings (Hidden by default) -->
+      <div id="pane-profile" class="hidden bg-[#0c1222] border border-slate-800 rounded-xl p-6 shadow-xl glass-panel space-y-6">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <span class="font-mono text-xs text-sky-400 font-bold">⚙️ workspace_profile.conf</span>
+          <span class="text-[10px] text-slate-500 font-mono">Configuration Mode</span>
+        </div>
+
+        <form method="POST" class="space-y-6 font-mono text-xs">
+          <input type="hidden" name="action" value="update_settings" />
+
+          <!-- Segment A: Developer Metadata -->
+          <div class="space-y-4">
+            <h3 class="text-sky-400 font-bold border-b border-slate-800/60 pb-1">// Developer Meta Details</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1">
+                <label for="dev_name" class="text-slate-400">DEV_NAME</label>
+                <input type="text" id="dev_name" name="dev_name" value={settingsMap.get('dev_name') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="dev_role" class="text-slate-400">DEV_ROLE</label>
+                <input type="text" id="dev_role" name="dev_role" value={settingsMap.get('dev_role') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="dev_languages" class="text-slate-400">DEV_LANGUAGES (Comma Separated)</label>
+                <input type="text" id="dev_languages" name="dev_languages" value={settingsMap.get('dev_languages') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="dev_focus" class="text-slate-400">DEV_FOCUS</label>
+                <input type="text" id="dev_focus" name="dev_focus" value={settingsMap.get('dev_focus') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Segment B: Hero Section -->
+          <div class="space-y-4 pt-2">
+            <h3 class="text-sky-400 font-bold border-b border-slate-800/60 pb-1">// Hero Section Configurations</h3>
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <label for="hero_title" class="text-slate-400">HERO_TITLE</label>
+                <input type="text" id="hero_title" name="hero_title" value={settingsMap.get('hero_title') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="hero_description" class="text-slate-400">HERO_DESCRIPTION</label>
+                <textarea id="hero_description" name="hero_description" rows="3" required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs">{settingsMap.get('hero_description') || ''}</textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Segment C: About Section -->
+          <div class="space-y-4 pt-2">
+            <h3 class="text-sky-400 font-bold border-b border-slate-800/60 pb-1">// About Section Configurations</h3>
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <label for="about_title" class="text-slate-400">ABOUT_TITLE</label>
+                <input type="text" id="about_title" name="about_title" value={settingsMap.get('about_title') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="about_description_1" class="text-slate-400">ABOUT_DESCRIPTION_PARAGRAPH_1</label>
+                <textarea id="about_description_1" name="about_description_1" rows="3" required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs">{settingsMap.get('about_description_1') || ''}</textarea>
+              </div>
+              <div class="space-y-1">
+                <label for="about_description_2" class="text-slate-400">ABOUT_DESCRIPTION_PARAGRAPH_2</label>
+                <textarea id="about_description_2" name="about_description_2" rows="3" required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs">{settingsMap.get('about_description_2') || ''}</textarea>
+              </div>
+              <div class="space-y-1">
+                <label for="about_description_3" class="text-slate-400">ABOUT_DESCRIPTION_PARAGRAPH_3</label>
+                <textarea id="about_description_3" name="about_description_3" rows="3" required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs">{settingsMap.get('about_description_3') || ''}</textarea>
+              </div>
+              <div class="space-y-1">
+                <label for="about_philosophy" class="text-slate-400">ABOUT_PHILOSOPHY_MOCK_CODE</label>
+                <input type="text" id="about_philosophy" name="about_philosophy" value={settingsMap.get('about_philosophy') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Segment D: Contact & Connections -->
+          <div class="space-y-4 pt-2">
+            <h3 class="text-sky-400 font-bold border-b border-slate-800/60 pb-1">// Contact & Social Links</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1">
+                <label for="contact_email" class="text-slate-400">CONTACT_EMAIL</label>
+                <input type="email" id="contact_email" name="contact_email" value={settingsMap.get('contact_email') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="contact_github" class="text-slate-400">CONTACT_GITHUB (username/repo or domain)</label>
+                <input type="text" id="contact_github" name="contact_github" value={settingsMap.get('contact_github') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="contact_linkedin" class="text-slate-400">CONTACT_LINKEDIN (path)</label>
+                <input type="text" id="contact_linkedin" name="contact_linkedin" value={settingsMap.get('contact_linkedin') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+              <div class="space-y-1">
+                <label for="contact_resume_link" class="text-slate-400">RESUME_DOWNLOAD_LINK</label>
+                <input type="text" id="contact_resume_link" name="contact_resume_link" value={settingsMap.get('contact_resume_link') || ''} required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500" />
+              </div>
+            </div>
+            <div class="space-y-1">
+              <label for="contact_description" class="text-slate-400">CONTACT_DESCRIPTION</label>
+              <textarea id="contact_description" name="contact_description" rows="3" required class="w-full bg-[#070a12] border ide-border rounded p-2 text-slate-200 focus:outline-none focus:border-sky-500 font-sans text-xs">{settingsMap.get('contact_description') || ''}</textarea>
+            </div>
+          </div>
+
+          <div class="flex justify-end pt-4 border-t border-slate-800">
+            <button type="submit" class="px-6 py-2.5 bg-sky-500 hover:bg-sky-400 text-slate-900 font-bold rounded font-mono cursor-pointer transition-colors shadow-lg shadow-sky-500/10">
+              Commit Profile Changes
+            </button>
+          </div>
+        </form>
+      </div>
+
+    </div>
+  )}
+</Layout>
+
+<!-- Client side Javascript for toggling forms and editing projects dynamically -->
+<script>
+  // 1. Add/Edit Project Form Toggle
+  const toggleProjFormBtn = document.getElementById('toggle-project-form-btn');
+  const cancelProjFormBtn = document.getElementById('cancel-project-form-btn');
+  const projFormContainer = document.getElementById('project-form-container');
+  const projMutForm = document.getElementById('project-mut-form') as HTMLFormElement;
+  const formTitle = document.getElementById('form-title');
+  const actionField = document.getElementById('project-action-field') as HTMLInputElement;
+  const idField = document.getElementById('project-id-field') as HTMLInputElement;
+
+  // Input fields
+  const pTitle = document.getElementById('p-title') as HTMLInputElement;
+  const pTags = document.getElementById('p-tags') as HTMLInputElement;
+  const pDesc = document.getElementById('p-desc') as HTMLTextAreaElement;
+  const pGithub = document.getElementById('p-github') as HTMLInputElement;
+  const pLive = document.getElementById('p-live') as HTMLInputElement;
+
+  const showProjectForm = (isEdit = false) => {
+    projFormContainer?.classList.remove('hidden');
+    if (!isEdit) {
+      // Clear inputs for new project addition
+      if (projMutForm) projMutForm.reset();
+      if (actionField) actionField.value = 'add_project';
+      if (idField) idField.value = '';
+      if (formTitle) formTitle.innerText = '// Add Project File';
+    }
+  };
+
+  const hideProjectForm = () => {
+    projFormContainer?.classList.add('hidden');
+    if (projMutForm) projMutForm.reset();
+  };
+
+  toggleProjFormBtn?.addEventListener('click', () => showProjectForm(false));
+  cancelProjFormBtn?.addEventListener('click', hideProjectForm);
+
+  // Bind edit buttons to populate form
+  const editButtons = document.querySelectorAll('.edit-project-btn');
+  editButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const target = e.currentTarget as HTMLButtonElement;
+      
+      const id = target.getAttribute('data-id') || '';
+      const title = target.getAttribute('data-title') || '';
+      const desc = target.getAttribute('data-desc') || '';
+      const tags = target.getAttribute('data-tags') || '';
+      const github = target.getAttribute('data-github') || '';
+      const live = target.getAttribute('data-live') || '';
+
+      // Populate form fields
+      if (idField) idField.value = id;
+      if (pTitle) pTitle.value = title;
+      if (pDesc) pDesc.value = desc;
+      if (pTags) pTags.value = tags;
+      if (pGithub) pGithub.value = github;
+      if (pLive) pLive.value = live;
+
+      // Switch mode to edit
+      if (actionField) actionField.value = 'edit_project';
+      if (formTitle) formTitle.innerText = `// Edit Project: ${title}`;
+      
+      showProjectForm(true);
+      
+      // Scroll to form
+      projFormContainer?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+
+  // 2. Skill Form Toggle
+  const toggleSkillFormBtn = document.getElementById('toggle-skill-form-btn');
+  const cancelSkillFormBtn = document.getElementById('cancel-skill-form-btn');
+  const skillFormContainer = document.getElementById('skill-form-container');
+
+  toggleSkillFormBtn?.addEventListener('click', () => {
+    skillFormContainer?.classList.remove('hidden');
+  });
+  cancelSkillFormBtn?.addEventListener('click', () => {
+    skillFormContainer?.classList.add('hidden');
+  });
+
+  // 3. Tab Switching
+  const btnTabContent = document.getElementById('btn-tab-content');
+  const btnTabProfile = document.getElementById('btn-tab-profile');
+  const paneContent = document.getElementById('pane-content');
+  const paneProfile = document.getElementById('pane-profile');
+
+  btnTabContent?.addEventListener('click', () => {
+    paneContent?.classList.remove('hidden');
+    paneProfile?.classList.add('hidden');
+
+    btnTabContent.classList.add('bg-[#0c1222]', 'text-sky-400', 'border-b-sky-500');
+    btnTabContent.classList.remove('text-slate-500');
+    btnTabProfile?.classList.remove('bg-[#0c1222]', 'text-sky-400', 'border-b-sky-500');
+    btnTabProfile?.classList.add('text-slate-500');
+  });
+
+  btnTabProfile?.addEventListener('click', () => {
+    paneProfile?.classList.remove('hidden');
+    paneContent?.classList.add('hidden');
+
+    btnTabProfile.classList.add('bg-[#0c1222]', 'text-sky-400', 'border-b-sky-500');
+    btnTabProfile.classList.remove('text-slate-500');
+    btnTabContent?.classList.remove('bg-[#0c1222]', 'text-sky-400', 'border-b-sky-500');
+    btnTabContent?.classList.add('text-slate-500');
+  });
+</script>
