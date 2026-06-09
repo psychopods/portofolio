@@ -14,6 +14,7 @@ let titleVal = "Paschal Joseph | Systems Architect & Cross-Platform Developer";
 let descVal = "Systems-focused Software Architect and Developer with expertise in Rust (Core Logic), Kotlin Multiplatform (KMP), distributed telemetry systems, and serial port hardware integrations.";
 let projectsCount = 0;
 let skillsCount = 0;
+let contactGithub = "github.com/psychopods";
 
 try {
   const settings = db.prepare('SELECT * FROM portfolio_settings').all() as { key: string, value: string }[];
@@ -27,6 +28,9 @@ try {
   if (settingsMap.has('hero_description')) {
     descVal = settingsMap.get('hero_description')!;
   }
+  if (settingsMap.has('contact_github')) {
+    contactGithub = settingsMap.get('contact_github')!;
+  }
 
   projectsCount = (db.prepare('SELECT COUNT(*) as count FROM projects').get() as { count: number }).count;
   skillsCount = (db.prepare('SELECT COUNT(*) as count FROM skills').get() as { count: number }).count;
@@ -34,6 +38,7 @@ try {
   console.error("Layout DB query failed:", err);
 }
 
+const githubUsername = contactGithub.replace(/^(https?:\/\/)?(www\.)?github\.com\//i, '').split('/')[0] || 'developer';
 const devNameFile = devName.toLowerCase().replace(/\s+/g, '_') + '_portfolio.rs';
 
 const { 
@@ -65,7 +70,7 @@ const {
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   </head>
-  <body class="bg-[#0b0f19] text-[#e2e8f0] font-sans h-screen flex flex-col overflow-hidden antialiased select-none">
+  <body class="bg-[#0b0f19] text-[#e2e8f0] font-sans h-dvh flex flex-col overflow-hidden antialiased select-none">
     
     <!-- IDE Top Window Bar -->
     <header class="bg-[#0f1422] border-b ide-border h-11 min-h-11 flex items-center justify-between px-4 z-40">
@@ -274,7 +279,7 @@ const {
         </div>
 
         <!-- Collapsible Bottom Terminal Panel -->
-        <div id="ide-terminal-panel" class="bg-[#0c101b] border-t ide-border h-48 flex flex-col hidden select-text">
+        <div id="ide-terminal-panel" class="bg-[#0c101b] border-t ide-border h-36 md:h-48 flex flex-col hidden select-text">
           <!-- Terminal Header -->
           <div class="bg-[#0f1422] border-b ide-border h-8 min-h-8 flex items-center justify-between px-4 text-[11px] font-mono text-[#64748b]">
             <div class="flex items-center space-x-4">
@@ -293,7 +298,7 @@ const {
             <p class="text-amber-500">[system] Database data.db successfully compiled and loaded with {projectsCount} projects & {skillsCount} skills.</p>
             <p class="text-slate-400">[system] Press <kbd class="px-1 bg-slate-800 border border-slate-700 rounded text-[10px] text-slate-300">Ctrl+P</kbd> or click the top search bar to launch the command palette.</p>
             <div class="flex items-center gap-1.5 text-slate-400 mt-2.5">
-              <span class="text-emerald-400 font-bold">psychopods@morta:~/portfolio$</span>
+              <span class="text-emerald-400 font-bold">{githubUsername}@morta:~/portfolio$</span>
               <span class="w-1.5 h-3.5 bg-slate-400 animate-pulse inline-block"></span>
             </div>
           </div>

@@ -1,46 +1,37 @@
-# Astro Starter Kit: Basics
+# Paschal Joseph Portfolio
+
+An Astro SSR personal portfolio with an IDE-inspired interface, SQLite-backed content, and a small admin workspace for editing profile copy, projects, skills, and current status.
+
+## Stack
+
+- Astro 6 with the Node standalone adapter
+- Tailwind CSS 4
+- better-sqlite3 for local content storage
+- bcryptjs for admin password hashing
+
+## Commands
 
 ```sh
-npm create astro@latest -- --template basics
+npm install
+npm run dev
+npm run build
+npm run preview
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+The dev server defaults to `http://localhost:4321`.
 
-## 🚀 Project Structure
+## Admin
 
-Inside of your Astro project, you'll see the following folders and files:
+Open `/admin` to manage portfolio content. The initial password is read from `ADMIN_PASSWORD`; if it is not set, the app seeds a local default of `admin`.
 
-```text
-/
-├── public/
-│   └── favicon.svg
-├── src
-│   ├── assets
-│   │   └── astro.svg
-│   ├── components
-│   │   └── Welcome.astro
-│   ├── layouts
-│   │   └── Layout.astro
-│   └── pages
-│       └── index.astro
-└── package.json
+Set a stronger password before deploying:
+
+```sh
+ADMIN_PASSWORD="replace-with-a-strong-password" npm run dev
 ```
 
-To learn more about the folder structure of an Astro project, refer to [our guide on project structure](https://docs.astro.build/en/basics/project-structure/).
+The admin panel can also rehash and update the password after login.
 
-## 🧞 Commands
+## Data
 
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+Portfolio content lives in `data.db` at the project root. The database is initialized automatically by [src/lib/db.ts](/home/paschaltimoth/Work/personal/portofolio/src/lib/db.ts) if the tables are empty.

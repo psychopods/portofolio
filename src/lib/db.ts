@@ -89,7 +89,10 @@ function seedDatabase() {
     insertSetting.run('contact_github', 'github.com/psychopods');
     insertSetting.run('contact_linkedin', 'linkedin.com/in/paschaltimoth');
     insertSetting.run('contact_resume_link', '/Paschal_Joseph_Resume.odt');
-    insertSetting.run('contact_description', 'Interested in starting a project, collaborating on compilers, or looking for a polyglot engineer to reinforce your systems/client pipelines? Let\'s connect. Run the shell script script block on the right or reach out directly.');
+    insertSetting.run('contact_description', 'Interested in starting a project, collaborating on compilers, or looking for a polyglot engineer to reinforce your systems/client pipelines? Let\'s connect through the shell block on the right or reach out directly.');
+    insertSetting.run('bento_systems_desc', 'Writing memory-safe code, raw OS interactions, native performance, and targeted WASM compiler systems.');
+    insertSetting.run('bento_crossplatform_desc', 'Designing elegant application structures, offline-first client syncing, and multi-runtime desktop/mobile apps.');
+    insertSetting.run('bento_backendweb_desc', 'Structuring hyper-fast server-side endpoints, microservices, local storage configurations, and database query layers.');
   }
 
   // Check if projects table is empty
